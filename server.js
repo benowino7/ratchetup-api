@@ -28,6 +28,12 @@ const allowedOrigins = [
   "https://admin.ratchetup.ai",
   "https://ratchetup.ai",
   "https://www.ratchetup.ai",
+  "https://ratchetup.org",
+  "https://www.ratchetup.org",
+  "https://ratchetup.io",
+  "https://www.ratchetup.io",
+  "http://ratchetup.org",
+  "http://ratchetup.io",
 ];
 
 const corsOptions = {

@@ -49,9 +49,19 @@ async function getUserRoleAndSubscription(userId) {
 
   const roles = user.roles.filter((r) => r.isActive).map((r) => r.role);
   const subscription = user.userSubscription[0] || null;
+
+  // "isPlatinum" here = "has an active premium subscription that unlocks
+  // messaging". After the multi-duration rebrand, job-seeker plans are
+  // named "Platinum 1-Month"/"Platinum 3-Month"/"Platinum 6-Month"/
+  // "Platinum 1-Year" — the old exact-match check failed for all of them.
+  // Recruiter plans still use "Platinum" (exact), which `startsWith`
+  // also matches. Free Trial is always excluded.
+  const planName = subscription?.plan?.name?.toLowerCase() || "";
+  const isActive = subscription?.status === "ACTIVE";
   const isPlatinum =
-    subscription?.plan?.name?.toLowerCase() === "platinum" &&
-    subscription?.status === "ACTIVE";
+    isActive &&
+    !planName.includes("trial") &&
+    planName.startsWith("platinum");
 
   return { user, roles, subscription, isPlatinum };
 }

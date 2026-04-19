@@ -44,12 +44,13 @@ async function getCachedRankings(jobId, currentApplicantCount) {
 
 /**
  * Store ranking results in cache, upsert by jobId.
+ * Returns the upserted cache row id (used by reflection to link its report).
  */
 async function setCachedRankings(jobId, applicantCount, rankResult) {
 	try {
 		const now = new Date();
 		const expiresAt = new Date(now.getTime() + CACHE_TTL_MS);
-		await prisma.aIRankingCache.upsert({
+		const row = await prisma.aIRankingCache.upsert({
 			where: { jobId },
 			create: {
 				jobId,
@@ -64,9 +65,12 @@ async function setCachedRankings(jobId, applicantCount, rankResult) {
 				rankedAt: now,
 				expiresAt,
 			},
+			select: { id: true },
 		});
+		return row.id;
 	} catch (err) {
 		console.error("[aiRankings] cache write error:", err.message);
+		return null;
 	}
 }
 
@@ -147,11 +151,22 @@ const getAIRankings = async (req, res) => {
 		let rankResult = null;
 		let fromCache = false;
 		let jobProfile = null;
+		let rankingCacheId = null;   // captured for optional reflection linkage
 		if (!forceRefresh) {
 			const cached = await getCachedRankings(jobId, applicantCount);
 			if (cached) {
 				rankResult = cached;
 				fromCache = true;
+			}
+			// If we hit cache, look up the row id so reflection can link to it.
+			if (fromCache) {
+				try {
+					const row = await prisma.aIRankingCache.findUnique({
+						where: { jobId },
+						select: { id: true },
+					});
+					rankingCacheId = row?.id || null;
+				} catch {}
 			}
 		}
 
@@ -201,8 +216,8 @@ const getAIRankings = async (req, res) => {
 				useAI: useAI && isAIAvailable(),
 			});
 
-			// Store in cache (fire and forget)
-			setCachedRankings(jobId, applicantCount, rankResult);
+			// Store in cache and capture the row id for optional reflection linkage
+			rankingCacheId = await setCachedRankings(jobId, applicantCount, rankResult);
 		}
 
 		// 5) Apply tier filter if specified
@@ -239,6 +254,56 @@ const getAIRankings = async (req, res) => {
 			meta: r.meta,
 		}));
 
+		// ── Optional reflection (opt-in via ?reflect=true) ─────────────────
+		let reflectionReport = null;
+		const reflectOn = String(req.query.reflect || "").toLowerCase() === "true";
+		if (reflectOn && rankResult.rankings?.length) {
+			try {
+				// Lazy-require to avoid loading the module when reflection isn't used
+				const { runAndPersistReflection } = require("../ai/reflectionAgent");
+
+				// If jobProfile wasn't populated this request (cache hit path),
+				// build a minimal one from the persisted job record.
+				const jobForReflection = {
+					id: job.id,
+					title: job.title,
+					company: job.company?.name,
+					location: job.locationName || job.location,
+					minYearsExperience: job.minYearsExperience,
+					educationRequirement: job.educationRequirement,
+					requiredSkills:
+						jobProfile?.requiredSkills ||
+						(job.skills || []).map((s) => s.skill?.name).filter(Boolean),
+					preferredSkills: jobProfile?.preferredSkills || [],
+					keywords: jobProfile?.keywords || [],
+				};
+
+				const rankedForReflection = rankResult.rankings.map((r) => ({
+					candidateId:
+						r.candidate?.id ||
+						r.candidate?.applicationId ||
+						`rank_${r.rank}`,
+					rank: r.rank,
+					overallScore: r.scores?.overall ?? r.overallScore ?? 0,
+					tier: r.tier,
+					matchedItems: r.skillGap?.matchedRequired || [],
+					criticalGaps: r.skillGap?.missingRequired || [],
+					transferableSkills: r.skillGap?.transferableSkills || [],
+					concerns: (r.redFlags || []).map((f) => f.reason || String(f)),
+				}));
+
+				reflectionReport = await runAndPersistReflection({
+					job: jobForReflection,
+					rankedCandidates: rankedForReflection,
+					context: "RECRUITER_RANKING",
+					rankingCacheId,
+				});
+			} catch (err) {
+				console.error("[aiRankings] Reflection failed:", err.message);
+				reflectionReport = null;
+			}
+		}
+
 		return res.status(200).json({
 			status: "SUCCESS",
 			message: {
@@ -267,6 +332,7 @@ const getAIRankings = async (req, res) => {
 						tier: tierFilter || "ALL",
 					},
 				},
+				...(reflectionReport ? { reflection: reflectionReport } : {}),
 			},
 		});
 	} catch (error) {

@@ -1,9 +1,28 @@
+const crypto = require("crypto");
 const { prisma } = require("../../prisma");
+const { runReflection } = require("../ai/reflectionAgent");
+
+// Admin CV analysis cache TTL — 72 hours per product spec. Applies per
+// (cvContentHash, jobId) pair. Bypassable via ?refresh=true.
+const ADMIN_CV_CACHE_TTL_MS = 72 * 60 * 60 * 1000;
+const CLAUDE_CV_MODEL = "claude-sonnet-4-20250514";
+
+function sha256Hex(s) {
+	return crypto.createHash("sha256").update(s || "", "utf8").digest("hex");
+}
 
 /**
  * Analyze one or more CVs against selected jobs using Claude AI
  * Returns skill gap analysis with scoring, ranking, and detailed breakdown
  * Supports both text-based and scanned/image PDFs via Claude Vision fallback
+ *
+ * New (additive):
+ *   - Caches each (cvContentHash, jobId) analysis in AdminCvAnalysisCache
+ *     for 72h. If every requested pair is cached, Claude is skipped
+ *     entirely (pure token savings).
+ *   - ?refresh=true  — bypass cache, always call Claude.
+ *   - ?reflect=true  — run the Reflection Agent over the assembled
+ *     rankings and attach a reflection report to the response.
  */
 const analyzeCv = async (req, res) => {
 	try {
@@ -72,8 +91,60 @@ const analyzeCv = async (req, res) => {
 			company: job.company?.name || "Unknown",
 		}));
 
-		// Build candidate sections for AI prompt
-		const candidateSections = candidates.map((c, i) => `
+		// Hash each CV so we can look up prior analyses in AdminCvAnalysisCache.
+		for (const c of candidates) {
+			c.contentHash = sha256Hex(c.cvText);
+		}
+
+		// ── Cache lookup (unless ?refresh=true) ────────────────────────────
+		// For every (candidate, job) pair, look for a cached analysis that's
+		// still within its 72h TTL. If we have all of them, skip Claude.
+		const refresh = String(req.query.refresh || req.body.refresh || "").toLowerCase() === "true";
+		const reflectOn = String(req.query.reflect || req.body.reflect || "").toLowerCase() === "true";
+		const now = new Date();
+
+		let cacheHits = {}; // { [`${hash}__${jobId}`]: { analysisJson, model, tokensUsed } }
+		let totalPairs = candidates.length * jobs.length;
+		let cachedCount = 0;
+
+		if (!refresh) {
+			const hashes = candidates.map((c) => c.contentHash);
+			const jobIds = jobs.map((j) => j.id);
+			const cacheRows = await prisma.adminCvAnalysisCache.findMany({
+				where: {
+					cvContentHash: { in: hashes },
+					jobId: { in: jobIds },
+					expiresAt: { gt: now },
+				},
+				select: {
+					cvContentHash: true,
+					jobId: true,
+					analysisJson: true,
+					model: true,
+					tokensUsed: true,
+				},
+			});
+			for (const r of cacheRows) {
+				cacheHits[`${r.cvContentHash}__${r.jobId}`] = r;
+			}
+			cachedCount = Object.keys(cacheHits).length;
+		}
+
+		const cacheFullyCovers = !refresh && cachedCount === totalPairs;
+
+		// ── Assemble the analysis result — from cache or Claude ────────────
+		let analysis;
+		let usedCache = false;
+		let claudeTokensUsed = 0;
+
+		if (cacheFullyCovers) {
+			// All pairs cached — stitch a response without calling Claude.
+			usedCache = true;
+			analysis = stitchAnalysisFromCache(candidates, jobs, cacheHits);
+		} else {
+			// Fall through to existing Claude call (unchanged).
+			// Build candidate sections for AI prompt
+			const candidateSections = candidates.map((c, i) => `
 ### Candidate ${i + 1}: ${c.name} (File: ${c.fileName})
 ${c.cvText.substring(0, 5000)}
 `).join("\n");
@@ -159,7 +230,9 @@ Return ONLY valid JSON, no markdown or explanation.`,
 		});
 
 		const content = response.content[0].text;
-		let analysis;
+		claudeTokensUsed =
+			(response.usage?.input_tokens || 0) +
+			(response.usage?.output_tokens || 0);
 		try {
 			const jsonMatch = content.match(/\{[\s\S]*\}/);
 			analysis = JSON.parse(jsonMatch ? jsonMatch[0] : content);
@@ -193,9 +266,10 @@ Return ONLY valid JSON, no markdown or explanation.`,
 				});
 			}
 		}
+		}   // ← closes the `else` (Claude path) opened earlier for cache miss
 
-		// Sort each candidate's analyses by score
-		if (analysis.candidates) {
+		// Sort each candidate's analyses by score (applies to cache + Claude)
+		if (analysis?.candidates) {
 			for (const candidate of analysis.candidates) {
 				if (candidate.analyses) {
 					candidate.analyses.sort((a, b) => (b.overallScore || 0) - (a.overallScore || 0));
@@ -204,9 +278,101 @@ Return ONLY valid JSON, no markdown or explanation.`,
 		}
 
 		// Sort rankings
-		if (analysis.rankings) {
+		if (analysis?.rankings) {
 			analysis.rankings.sort((a, b) => (b.averageScore || 0) - (a.averageScore || 0));
 			analysis.rankings.forEach((r, i) => r.rank = i + 1);
+		}
+
+		// ── Cache writes — only when we actually went to Claude ───────────
+		let cacheWrites = 0;
+		if (!usedCache && analysis?.candidates) {
+			const expiresAt = new Date(Date.now() + ADMIN_CV_CACHE_TTL_MS);
+			const perPairTokens =
+				candidates.length > 0
+					? Math.ceil(claudeTokensUsed / Math.max(candidates.length * jobs.length, 1))
+					: 0;
+			for (const candidateBlock of analysis.candidates) {
+				const candidate = candidates[candidateBlock.candidateIndex];
+				if (!candidate) continue;
+				const hash = candidate.contentHash;
+				for (const pairAnalysis of candidateBlock.analyses || []) {
+					if (!pairAnalysis.jobId) continue;
+					try {
+						await prisma.adminCvAnalysisCache.upsert({
+							where: {
+								cvContentHash_jobId: {
+									cvContentHash: hash,
+									jobId: pairAnalysis.jobId,
+								},
+							},
+							update: {
+								analysisJson: pairAnalysis,
+								model: CLAUDE_CV_MODEL,
+								tokensUsed: perPairTokens,
+								analyzedAt: new Date(),
+								expiresAt,
+								cvFileName: candidate.fileName,
+								candidateName: candidate.name,
+							},
+							create: {
+								cvContentHash: hash,
+								jobId: pairAnalysis.jobId,
+								cvFileName: candidate.fileName,
+								candidateName: candidate.name,
+								analysisJson: pairAnalysis,
+								model: CLAUDE_CV_MODEL,
+								tokensUsed: perPairTokens,
+								expiresAt,
+							},
+						});
+						cacheWrites++;
+					} catch (err) {
+						console.error(
+							`[AdminCvCache] upsert failed for hash=${hash.slice(0, 8)} job=${pairAnalysis.jobId}:`,
+							err.message,
+						);
+					}
+				}
+			}
+		}
+
+		// ── Optional reflection (opt-in via ?reflect=true) ─────────────────
+		let reflectionReport = null;
+		if (reflectOn && Array.isArray(analysis?.rankings) && analysis.rankings.length > 0) {
+			try {
+				const rankedCandidates = analysis.rankings.map((r) => {
+					const candBlock = (analysis.candidates || []).find(
+						(c) => c.candidateIndex === r.candidateIndex,
+					);
+					const topAnalysis = candBlock?.analyses?.[0] || {};
+					return {
+						candidateId: candBlock?.fileName || `candidate_${r.candidateIndex}`,
+						rank: r.rank,
+						overallScore: r.averageScore,
+						tier: topAnalysis.tier || "moderate",
+						matchedItems: topAnalysis.matchedSkills || [],
+						criticalGaps: topAnalysis.missingSkills || [],
+						transferableSkills: topAnalysis.transferableSkills || [],
+						concerns: topAnalysis.redFlags || [],
+					};
+				});
+				const reflectionJob = {
+					id: jobs[0]?.id,
+					title: jobs.length === 1 ? jobs[0].title : `${jobs.length} jobs analyzed together`,
+					company: jobs[0]?.company?.name,
+					requiredSkills: jobs.flatMap((j) => j.skills.map((s) => s.skill.name)),
+					preferredSkills: [],
+					keywords: [],
+				};
+				reflectionReport = await runReflection({
+					job: reflectionJob,
+					rankedCandidates,
+					context: "ADMIN_CV_ANALYSIS",
+				});
+			} catch (err) {
+				console.error("[AdminCvAnalysis] Reflection failed:", err.message);
+				reflectionReport = null;
+			}
 		}
 
 		return res.status(200).json({
@@ -217,6 +383,14 @@ Return ONLY valid JSON, no markdown or explanation.`,
 				rankings: analysis.rankings || [],
 				totalCandidates: candidates.length,
 				totalJobsAnalyzed: jobs.length,
+				cache: {
+					hit: usedCache,
+					hits: cachedCount,
+					totalPairs,
+					writes: cacheWrites,
+					ttlHours: 72,
+				},
+				...(reflectionReport ? { reflection: reflectionReport } : {}),
 			},
 		});
 	} catch (error) {
@@ -224,6 +398,48 @@ Return ONLY valid JSON, no markdown or explanation.`,
 		return res.status(500).json({ status: "ERROR", message: error.message || "Failed to analyze CV" });
 	}
 };
+
+/**
+ * Stitch an analysis response from the AdminCvAnalysisCache rows when every
+ * (candidate, job) pair is already cached. Skips Claude entirely — pure
+ * token savings on repeat admin clicks within the 72h TTL window.
+ */
+function stitchAnalysisFromCache(candidates, jobs, cacheHits) {
+	const candidatesOut = candidates.map((c, idx) => {
+		const analyses = jobs
+			.map((j) => {
+				const row = cacheHits[`${c.contentHash}__${j.id}`];
+				return row ? row.analysisJson : null;
+			})
+			.filter(Boolean);
+
+		return {
+			candidateIndex: idx,
+			candidateName: c.name || "Unknown",
+			fileName: c.fileName,
+			analyses,
+		};
+	});
+
+	const rankings = candidatesOut.map((cb, idx) => {
+		const scores = (cb.analyses || []).map((a) => a.overallScore || 0);
+		const avg = scores.length ? Math.round(scores.reduce((s, v) => s + v, 0) / scores.length) : 0;
+		const top = (cb.analyses || []).reduce(
+			(best, a) => ((a.overallScore || 0) > (best?.overallScore || 0) ? a : best),
+			null,
+		);
+		return {
+			rank: idx + 1, // will be re-sorted below
+			candidateName: cb.candidateName,
+			candidateIndex: idx,
+			averageScore: avg,
+			topJobMatch: top?.jobTitle || "",
+			summary: "Loaded from cache (analyzed within last 72h)",
+		};
+	});
+
+	return { candidates: candidatesOut, rankings };
+}
 
 /**
  * Extract text from PDF buffer, with Claude Vision fallback for scanned/image PDFs

@@ -416,6 +416,7 @@ model Job {
   jobApplications JobApplication[]
   saves SavedJob[]
   aiRankingCache AIRankingCache?
+  adminCvAnalysisCache AdminCvAnalysisCache[]
 
   @@index([companyId])
   @@index([status])
@@ -1040,9 +1041,96 @@ model AIRankingCache {
 
   createdAt DateTime @default(now())
 
+  /// Optional reflection pass over the ranked list.
+  reflectionReport ReflectionReport?
+
   @@unique([jobId])
   @@index([jobId])
   @@index([expiresAt])
+}
+
+/// =======================
+/// ADMIN CV ANALYSIS CACHE
+/// =======================
+/// Caches the Claude analysis of an admin-uploaded CV against a given Job,
+/// keyed by the hash of the CV's extracted text so the same file uploaded
+/// a second time skips the LLM call entirely. Prevents token burn on
+/// repeated admin analyses. TTL is 72h (applied in code).
+model AdminCvAnalysisCache {
+  id              String   @id @default(uuid())
+
+  /// sha256 of the CV's extracted text — identifies the CV content.
+  cvContentHash   String
+
+  cvFileName      String?
+  candidateName   String?
+
+  jobId           String
+  job             Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  /// Per-(cv, job) analysis JSON as returned by Claude.
+  analysisJson    Json
+
+  /// Which model produced this result (e.g. "claude-sonnet-4-20250514").
+  model           String
+
+  /// Tokens consumed for cost dashboards.
+  tokensUsed      Int      @default(0)
+
+  analyzedAt      DateTime @default(now())
+  expiresAt       DateTime
+
+  createdAt       DateTime @default(now())
+
+  @@unique([cvContentHash, jobId])
+  @@index([jobId])
+  @@index([expiresAt])
+}
+
+/// =======================
+/// REFLECTION REPORT
+/// =======================
+/// The Reflection Agent's review of a ranked candidate list. It never
+/// changes scores — it only annotates. Attached to an AIRankingCache for
+/// recruiter rankings; for admin CV analysis the report is returned
+/// inline in the HTTP response and may or may not be persisted.
+enum ReflectionContext {
+  RECRUITER_RANKING
+  ADMIN_CV_ANALYSIS
+}
+
+model ReflectionReport {
+  id              String   @id @default(uuid())
+
+  context         String
+
+  rankingCacheId  String?  @unique
+  rankingCache    AIRankingCache? @relation(fields: [rankingCacheId], references: [id], onDelete: Cascade)
+
+  recruiterNote   String   @db.Text
+
+  /// Array of { severity, flag_type, candidate_id, rank, message }
+  flags                  Json @default("[]")
+  /// string[] — candidate IDs worth a second look
+  hiddenGems             Json @default("[]")
+  /// string[] — candidate IDs the formula may have scored too high
+  overranked             Json @default("[]")
+  /// Array of { candidate_id, rank, missing }
+  hardRequirementGaps    Json @default("[]")
+  /// string[] — plain-English descriptions of structural issues
+  anomalies              Json @default("[]")
+
+  poolHealth             String
+  shortlistReady         Boolean @default(true)
+  suggestedShortlistSize Int     @default(5)
+  confidence             String
+
+  model                  String
+  tokensUsed             Int     @default(0)
+
+  createdAt              DateTime @default(now())
+
+  @@index([context])
 }
 
 /// =======================

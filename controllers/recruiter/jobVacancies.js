@@ -557,6 +557,9 @@ const validateUserRole = (req) => {};
 const getAllJobs = async (req, res) => {
 	try {
 		const userId = req.user?.userId;
+		// Track whether the caller explicitly asked for a status so we can
+		// distinguish it from the default-PUBLISHED fallback below.
+		const statusExplicit = req.query.status !== undefined;
 		const {
 			status: rawStatus = "PUBLISHED", // default: public jobs
 			search,
@@ -575,12 +578,18 @@ const getAllJobs = async (req, res) => {
 			limit = 20,
 		} = req.query;
 
-		// Only scope to recruiter's company when authenticated as a recruiter
+		// Only scope to recruiter's company when authenticated as a recruiter.
+		// NOTE: must include `id` here — it's used below as
+		// `recruiterProfile?.id` to scope jobs to this recruiter. Previously
+		// only `companyId` was selected, so `.id` was always undefined and
+		// the recruiter-scope filter silently fell off, returning unrelated
+		// jobs. This broke the "jobs with applications" list on the
+		// recruiter dashboard.
 		let recruiterProfile = null;
 		if (userId) {
 			recruiterProfile = await prisma.recruiterProfile.findUnique({
 				where: { userId },
-				select: { companyId: true },
+				select: { id: true, companyId: true },
 			});
 		}
 
@@ -646,8 +655,16 @@ const getAllJobs = async (req, res) => {
 			searchCondition = { OR: orConditions };
 		}
 
+		// When a recruiter asks for "jobs with applications" and didn't
+		// explicitly pass a status, skip the PUBLISHED default. Feed jobs get
+		// auto-CLOSED by the JobG8 sync cron even while applications remain,
+		// so recruiters must see closed jobs that have active applications.
+		// Public callers are unaffected because they don't pass
+		// `hasApplications=true`.
+		const skipStatusFilter = !statusExplicit && hasApplications === "true";
+
 		const where = {
-			...(status && { status }),
+			...(!skipStatusFilter && status && { status }),
 
 			// Scope to this recruiter's jobs (includes feed jobs assigned to them)
 			...(recruiterProfile?.id && { recruiterProfileId: recruiterProfile.id }),

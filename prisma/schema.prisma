@@ -1128,9 +1128,21 @@ model ReflectionReport {
   model                  String
   tokensUsed             Int     @default(0)
 
+  /// Deterministic key used by admin CV analysis (sha256 of sorted cv
+  /// content hashes + sorted job ids) so that repeat admin runs within
+  /// the 72h window return the persisted report instead of re-calling
+  /// the LLM. Null for recruiter rankings (they key on rankingCacheId).
+  cacheKey               String?
+
+  /// When this reflection expires. Re-generation is blocked before this.
+  /// Default: createdAt + 72h, set in code.
+  expiresAt              DateTime?
+
   createdAt              DateTime @default(now())
 
   @@index([context])
+  @@index([cacheKey, context])
+  @@index([expiresAt])
 }
 
 /// =======================

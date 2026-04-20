@@ -1,6 +1,9 @@
 const crypto = require("crypto");
 const { prisma } = require("../../prisma");
-const { runReflection } = require("../ai/reflectionAgent");
+const {
+	runAndCacheReflection,
+	buildAdminCacheKey,
+} = require("../ai/reflectionAgent");
 
 // Admin CV analysis cache TTL — 72 hours per product spec. Applies per
 // (cvContentHash, jobId) pair. Bypassable via ?refresh=true.
@@ -337,7 +340,11 @@ Return ONLY valid JSON, no markdown or explanation.`,
 		}
 
 		// ── Optional reflection (opt-in via ?reflect=true) ─────────────────
+		// Reflections are persisted for 72h keyed by (cv hashes + job ids),
+		// so repeat admin clicks within that window reuse the saved report.
+		// Pass ?reflectRefresh=true to regenerate before the TTL.
 		let reflectionReport = null;
+		const reflectRefresh = String(req.query.reflectRefresh || req.body.reflectRefresh || "").toLowerCase() === "true";
 		if (reflectOn && Array.isArray(analysis?.rankings) && analysis.rankings.length > 0) {
 			try {
 				const rankedCandidates = analysis.rankings.map((r) => {
@@ -360,14 +367,25 @@ Return ONLY valid JSON, no markdown or explanation.`,
 					id: jobs[0]?.id,
 					title: jobs.length === 1 ? jobs[0].title : `${jobs.length} jobs analyzed together`,
 					company: jobs[0]?.company?.name,
+					// Concatenate job descriptions so the requirements auto-gen
+					// has text to work with when skills lists are empty.
+					description: jobs
+						.map((j) => `# ${j.title}\n${j.description || ""}`)
+						.join("\n\n---\n\n"),
 					requiredSkills: jobs.flatMap((j) => j.skills.map((s) => s.skill.name)),
 					preferredSkills: [],
 					keywords: [],
 				};
-				reflectionReport = await runReflection({
+				const cacheKey = buildAdminCacheKey({
+					cvHashes: candidates.map((c) => c.contentHash),
+					jobIds: jobs.map((j) => j.id),
+				});
+				reflectionReport = await runAndCacheReflection({
 					job: reflectionJob,
 					rankedCandidates,
 					context: "ADMIN_CV_ANALYSIS",
+					cacheKey,
+					forceRefresh: reflectRefresh,
 				});
 			} catch (err) {
 				console.error("[AdminCvAnalysis] Reflection failed:", err.message);

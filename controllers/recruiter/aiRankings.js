@@ -257,10 +257,11 @@ const getAIRankings = async (req, res) => {
 		// ── Optional reflection (opt-in via ?reflect=true) ─────────────────
 		let reflectionReport = null;
 		const reflectOn = String(req.query.reflect || "").toLowerCase() === "true";
+		const reflectRefresh = String(req.query.reflectRefresh || "").toLowerCase() === "true";
 		if (reflectOn && rankResult.rankings?.length) {
 			try {
 				// Lazy-require to avoid loading the module when reflection isn't used
-				const { runAndPersistReflection } = require("../ai/reflectionAgent");
+				const { runAndCacheReflection } = require("../ai/reflectionAgent");
 
 				// If jobProfile wasn't populated this request (cache hit path),
 				// build a minimal one from the persisted job record.
@@ -269,6 +270,7 @@ const getAIRankings = async (req, res) => {
 					title: job.title,
 					company: job.company?.name,
 					location: job.locationName || job.location,
+					description: job.description,
 					minYearsExperience: job.minYearsExperience,
 					educationRequirement: job.educationRequirement,
 					requiredSkills:
@@ -292,11 +294,12 @@ const getAIRankings = async (req, res) => {
 					concerns: (r.redFlags || []).map((f) => f.reason || String(f)),
 				}));
 
-				reflectionReport = await runAndPersistReflection({
+				reflectionReport = await runAndCacheReflection({
 					job: jobForReflection,
 					rankedCandidates: rankedForReflection,
 					context: "RECRUITER_RANKING",
 					rankingCacheId,
+					forceRefresh: reflectRefresh,
 				});
 			} catch (err) {
 				console.error("[aiRankings] Reflection failed:", err.message);

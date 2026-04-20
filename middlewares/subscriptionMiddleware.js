@@ -48,18 +48,12 @@ const requireActiveJobSeekerSubscription = async (req, res, next) => {
 			});
 		}
 
-		// Block free trial — must have paid subscription
-		if (subscription.plan?.name === "Free Trial") {
-			return res.status(403).json({
-				error: true,
-				message: "A paid subscription is required. Please subscribe to at least Silver to access this feature.",
-				result: { requiresSubscription: true, requiresUpgrade: true },
-			});
-		}
-
+		// Free Trial is allowed through — it grants a limited 48h window
+		// (profile, CV upload, manual recommendations capped at 5).
+		// Paid-only routes layer `requirePaidSubscription` on top.
 		req.subscription = subscription;
 		req.subscriptionFeatures = subscription.plan?.feature?.features || null;
-		req.isTrial = false; // trials are now blocked above
+		req.isTrial = subscription.plan?.name === "Free Trial";
 		req.planName = subscription.plan?.name || null;
 
 		return next();

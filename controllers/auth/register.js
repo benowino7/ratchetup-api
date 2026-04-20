@@ -162,7 +162,33 @@ const register = async (req, res) => {
 					select: { id: true, userId: true, createdAt: true },
 				});
 
-				// No free trial — users must subscribe to at least Silver after registration
+				// Auto-grant a 48h Free Trial subscription so brand-new
+				// candidates can update their profile + add a CV + see up
+				// to 5 manual matches before subscribing.
+				const trialPlan = await tx.subscriptionPlan.findFirst({
+					where: { name: "Free Trial", userType: "JOB_SEEKER", isActive: true },
+					select: { id: true },
+				});
+				if (trialPlan) {
+					const now = new Date();
+					const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000); // 48h
+					try {
+						await tx.userSubscription.create({
+							data: {
+								userId: createdUser.id,
+								planId: trialPlan.id,
+								status: "ACTIVE",
+								startedAt: now,
+								expiresAt,
+							},
+						});
+					} catch (e) {
+						// Non-fatal — registration still succeeds even if trial creation fails.
+						console.error("[register] Free Trial creation failed:", e.message);
+					}
+				} else {
+					console.warn('[register] No active "Free Trial" JOB_SEEKER plan found; trial not granted.');
+				}
 			}
 
 			return { user: createdUser, jobSeekerProfile };

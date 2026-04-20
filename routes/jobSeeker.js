@@ -3,7 +3,7 @@ const { check, query, body, validationResult } = require("express-validator");
 const validateRequest = require("../middlewares/validateMiddleware");
 const Router = express.Router();
 const { authenticate } = require("../middlewares/authorizationMiddleware");
-const { requireActiveJobSeekerSubscription, enforceSavedJobsLimit } = require("../middlewares/subscriptionMiddleware");
+const { requireActiveJobSeekerSubscription, requirePaidSubscription, enforceSavedJobsLimit } = require("../middlewares/subscriptionMiddleware");
 const upload = require("../middlewares/uploadCvMiddleware");
 
 // Profile (subscription-gated)
@@ -60,28 +60,29 @@ Router.get("/cvs/:id/file", authenticate, requireActiveJobSeekerSubscription, se
 const { getJobSeekerDashboard } = require('../controllers/jobSeeker/dashbaord')
 Router.get("/dashboard", authenticate, requireActiveJobSeekerSubscription, getJobSeekerDashboard)
 
-// skills (subscription-gated)
+// skills (paid-only — profile editing handles skills via JSON arrays for trial)
 const { createJobSeekerSkill, getJobSeekerSkills, updateJobSeekerSkill, deleteJobSeekerSkill } = require("../controllers/jobSeeker/skills");
-Router.post("/skill", authenticate, requireActiveJobSeekerSubscription, createJobSeekerSkill);
+Router.post("/skill", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, createJobSeekerSkill);
 Router.get("/skills", authenticate, requireActiveJobSeekerSubscription, getJobSeekerSkills);
-Router.patch("/skills/:id", authenticate, requireActiveJobSeekerSubscription, updateJobSeekerSkill);
-Router.delete("/skills/:id", authenticate, requireActiveJobSeekerSubscription, deleteJobSeekerSkill);
+Router.patch("/skills/:id", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, updateJobSeekerSkill);
+Router.delete("/skills/:id", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, deleteJobSeekerSkill);
 
-// job applications
+// job applications (paid-only — internal applications are a paid feature)
 const { applyForJob, getMyApplications, withdrawJobApplication } = require("../controllers/jobSeeker/jopApplication");
-Router.post("/jobs/:jobId/apply", authenticate, requireActiveJobSeekerSubscription, applyForJob);
-Router.get("/jobs/applications", authenticate, requireActiveJobSeekerSubscription, getMyApplications);
-Router.patch("/jobs/:jobApplicationId/withdraw", authenticate, requireActiveJobSeekerSubscription, withdrawJobApplication);
+Router.post("/jobs/:jobId/apply", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, applyForJob);
+Router.get("/jobs/applications", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, getMyApplications);
+Router.patch("/jobs/:jobApplicationId/withdraw", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, withdrawJobApplication);
 
-// Suggest jobs
+// Suggest jobs — trial users get manual matches only, capped at 5 (no AI).
+// Controller reads req.isTrial and adapts.
 const { suggestJobsForJobSeeker } = require("../controllers/jobSeeker/suggestJobs");
 Router.get("/jobs/suggestions", authenticate, requireActiveJobSeekerSubscription, suggestJobsForJobSeeker);
 
-// Jobs
+// Jobs (saved jobs are a paid feature)
 const { saveJob, getSavedJobs, unsaveJob } = require("../controllers/jobSeeker/jobs");
-Router.post("/jobs/:jobId/save", authenticate, requireActiveJobSeekerSubscription, enforceSavedJobsLimit, saveJob);
-Router.get("/jobs/saved-jobs", authenticate, requireActiveJobSeekerSubscription, getSavedJobs);
-Router.delete("/jobs/:jobId/save", authenticate, requireActiveJobSeekerSubscription, unsaveJob);
+Router.post("/jobs/:jobId/save", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, enforceSavedJobsLimit, saveJob);
+Router.get("/jobs/saved-jobs", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, getSavedJobs);
+Router.delete("/jobs/:jobId/save", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, unsaveJob);
 
 // subscriptions
 const {
@@ -155,24 +156,25 @@ Router.get("/subscriptions/upgrade-quote", authenticate, getUpgradeTopUpAmount);
 Router.get("/subscriptions/invoices", authenticate, getMyInvoices);
 Router.get("/subscriptions/invoices/:invoiceId", authenticate, getInvoiceById);
 
-// External Apply ($3 payment)
+// External Apply (deprecated — frontend now opens applicationUrl directly,
+// but keep route paid-only in case it gets called).
 const { initiateExternalApply, checkExternalApplyStatus } = require("../controllers/jobSeeker/externalApply");
-Router.post("/jobs/:jobId/external-apply", authenticate, requireActiveJobSeekerSubscription, initiateExternalApply);
+Router.post("/jobs/:jobId/external-apply", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, initiateExternalApply);
 Router.get("/jobs/:jobId/external-apply/status", authenticate, checkExternalApplyStatus);
 
-// CV Extraction (AI-powered)
+// CV Extraction (AI-powered → paid only)
 const { extractCVData, extractAndFillProfile } = require("../controllers/jobSeeker/cvExtract");
-Router.post("/cv/:cvId/extract", authenticate, requireActiveJobSeekerSubscription, extractCVData);
-Router.post("/cv/extract-and-fill", authenticate, requireActiveJobSeekerSubscription, extractAndFillProfile);
+Router.post("/cv/:cvId/extract", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, extractCVData);
+Router.post("/cv/extract-and-fill", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, extractAndFillProfile);
 
-// CV PDF Download (subscription-gated)
+// CV PDF Download (paid feature)
 const { downloadProfileAsCv, htmlToPdf } = require("../controllers/jobSeeker/cvPdfGenerator");
-Router.get("/profile/download-cv", authenticate, requireActiveJobSeekerSubscription, downloadProfileAsCv);
-Router.post("/cv/html-to-pdf", authenticate, requireActiveJobSeekerSubscription, htmlToPdf);
+Router.get("/profile/download-cv", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, downloadProfileAsCv);
+Router.post("/cv/html-to-pdf", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, htmlToPdf);
 
-// Testimonial (subscription-gated)
+// Testimonial (paid feature)
 const { getMyTestimonial, upsertTestimonial } = require("../controllers/testimonial");
-Router.get("/testimonial", authenticate, requireActiveJobSeekerSubscription, getMyTestimonial);
-Router.post("/testimonial", authenticate, requireActiveJobSeekerSubscription, upsertTestimonial);
+Router.get("/testimonial", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, getMyTestimonial);
+Router.post("/testimonial", authenticate, requireActiveJobSeekerSubscription, requirePaidSubscription, upsertTestimonial);
 
 module.exports = Router;

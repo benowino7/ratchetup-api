@@ -325,6 +325,8 @@ async function handlesuggestJobsForJobSeeker(prisma, jobSeekerUserId, opts = {})
 		minSkillMatches = 1,
 		extraText = "",
 		weights = {},
+		// Trial mode caps: no AI call, 5 jobs max, CV required.
+		isTrial = false,
 	} = opts;
 
 	const safePage = Math.max(1, parseInt(page, 10) || 1);
@@ -392,21 +394,36 @@ async function handlesuggestJobsForJobSeeker(prisma, jobSeekerUserId, opts = {})
 		});
 	}
 
+	// Trial users MUST have a CV — no CV, no recommendations.
+	if (isTrial && !pickedCv) {
+		return {
+			jobs: [],
+			pagination: { total: 0, page: safePage, limit: safeLimit, totalPages: 0 },
+			meta: {
+				requiresCV: true,
+				trial: true,
+				message: "Add a CV to see manual job matches during your free trial.",
+			},
+		};
+	}
+
 	const cvText = pickedCv?.extractedText || "";
 	const keywords = extractKeywords(`${cvText}\n${extraText}`, { maxKeywords: keywordMax });
 	const keywordSet = new Set(keywords);
 
-	// --- AI-powered profile understanding ---
-	const aiPrefs = await getAiJobPreferences({
-		seekerSkills,
-		cvText,
-		experience: jobSeeker.experience,
-		education: jobSeeker.education,
-		summary: jobSeeker.summary,
-		certifications: jobSeeker.certifications,
-		languages: jobSeeker.languages,
-		interests: jobSeeker.interests,
-	});
+	// --- AI-powered profile understanding (skipped for trial users) ---
+	const aiPrefs = isTrial
+		? null
+		: await getAiJobPreferences({
+			seekerSkills,
+			cvText,
+			experience: jobSeeker.experience,
+			education: jobSeeker.education,
+			summary: jobSeeker.summary,
+			certifications: jobSeeker.certifications,
+			languages: jobSeeker.languages,
+			interests: jobSeeker.interests,
+		});
 
 	// Merge AI-inferred skills into the seeker skill set for broader matching
 	const allSkillNames = [...seekerSkills];
@@ -488,14 +505,19 @@ async function handlesuggestJobsForJobSeeker(prisma, jobSeekerUserId, opts = {})
 
 	scored.sort((a, b) => b.score - a.score);
 
-	const total = scored.length;
-	const totalPages = total === 0 ? 0 : Math.ceil(total / safeLimit);
-	const pageClamped = totalPages === 0 ? 1 : Math.min(safePage, totalPages);
+	// Trial users see at most 5 manual matches (single page, no pagination).
+	const TRIAL_MAX_RESULTS = 5;
+	const trimmed = isTrial ? scored.slice(0, TRIAL_MAX_RESULTS) : scored;
 
-	const start = (pageClamped - 1) * safeLimit;
-	const end = start + safeLimit;
+	const total = trimmed.length;
+	const effectiveLimit = isTrial ? TRIAL_MAX_RESULTS : safeLimit;
+	const totalPages = total === 0 ? 0 : Math.ceil(total / effectiveLimit);
+	const pageClamped = totalPages === 0 ? 1 : (isTrial ? 1 : Math.min(safePage, totalPages));
 
-	const pageItems = scored.slice(start, end).map((x) => ({
+	const start = (pageClamped - 1) * effectiveLimit;
+	const end = start + effectiveLimit;
+
+	const pageItems = trimmed.slice(start, end).map((x) => ({
 		...x.job,
 		recommendation: {
 			score: Number(x.score.toFixed(2)),
@@ -513,7 +535,7 @@ async function handlesuggestJobsForJobSeeker(prisma, jobSeekerUserId, opts = {})
 
 	return {
 		jobs: pageItems,
-		pagination: { total, page: pageClamped, limit: safeLimit, totalPages },
+		pagination: { total, page: pageClamped, limit: effectiveLimit, totalPages },
 		meta: {
 			seekerSkillsCount: seekerSkills.length,
 			candidatesFetched: candidates.length,
@@ -522,6 +544,8 @@ async function handlesuggestJobsForJobSeeker(prisma, jobSeekerUserId, opts = {})
 			returned: pageItems.length,
 			aiEnhanced: !!aiPrefs,
 			aiPreferences: aiPrefs || null,
+			trial: isTrial,
+			trialCap: isTrial ? TRIAL_MAX_RESULTS : null,
 		},
 	};
 }
@@ -679,6 +703,7 @@ const suggestJobsForJobSeeker = async (req, res) => {
 			limit,
 			extraText: q,
 			cvId,
+			isTrial: req.isTrial === true,
 		});
 
 		if (result?.meta?.error === "CV not found for this job seeker") {

@@ -48,7 +48,7 @@ const requireActiveJobSeekerSubscription = async (req, res, next) => {
 			});
 		}
 
-		// Free Trial is allowed through — it grants a limited 48h window
+		// Free Trial is allowed through — it grants a limited 90-day window
 		// (profile, CV upload, manual recommendations capped at 5).
 		// Paid-only routes layer `requirePaidSubscription` on top.
 		req.subscription = subscription;

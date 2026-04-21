@@ -162,7 +162,7 @@ const register = async (req, res) => {
 					select: { id: true, userId: true, createdAt: true },
 				});
 
-				// Auto-grant a 48h Free Trial subscription so brand-new
+				// Auto-grant a 90-day Free Trial subscription so brand-new
 				// candidates can update their profile + add a CV + see up
 				// to 5 manual matches before subscribing.
 				const trialPlan = await tx.subscriptionPlan.findFirst({
@@ -171,7 +171,7 @@ const register = async (req, res) => {
 				});
 				if (trialPlan) {
 					const now = new Date();
-					const expiresAt = new Date(now.getTime() + 48 * 60 * 60 * 1000); // 48h
+					const expiresAt = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000); // 90 days (~3 months)
 					try {
 						await tx.userSubscription.create({
 							data: {

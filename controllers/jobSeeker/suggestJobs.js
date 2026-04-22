@@ -487,16 +487,32 @@ async function handlesuggestJobsForJobSeeker(prisma, jobSeekerUserId, opts = {})
 		...(orConditions.length > 0 ? { OR: orConditions } : {}),
 	};
 
-	const candidates = await prisma.job.findMany({
+	const includeShape = {
+		company: { select: { id: true, name: true, country: true } },
+		skills: { include: { skill: true } },
+		industries: { include: { industry: true } },
+	};
+
+	let candidates = await prisma.job.findMany({
 		where: whereClause,
 		orderBy: { createdAt: "desc" },
 		take: candidatePool,
-		include: {
-			company: { select: { id: true, name: true, country: true } },
-			skills: { include: { skill: true } },
-			industries: { include: { industry: true } },
-		},
+		include: includeShape,
 	});
+
+	// Fallback: if the AI/skill-scoped filter excluded every PUBLISHED job,
+	// drop the OR clause so the user still sees something to browse. The
+	// scorer will still rank by CV keyword overlap, so matches bubble up.
+	let usedFallback = false;
+	if (candidates.length === 0 && orConditions.length > 0) {
+		candidates = await prisma.job.findMany({
+			where: { status: "PUBLISHED" },
+			orderBy: { createdAt: "desc" },
+			take: candidatePool,
+			include: includeShape,
+		});
+		usedFallback = true;
+	}
 
 	const scored = candidates.map((job) => {
 		const s = scoreJob({ job, seekerSkillSet, keywordSet, weights, aiPrefs });
@@ -546,6 +562,7 @@ async function handlesuggestJobsForJobSeeker(prisma, jobSeekerUserId, opts = {})
 			aiPreferences: aiPrefs || null,
 			trial: isTrial,
 			trialCap: isTrial ? TRIAL_MAX_RESULTS : null,
+			fallbackUsed: usedFallback,
 		},
 	};
 }

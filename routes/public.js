@@ -70,6 +70,10 @@ Router.get("/industries/taxonomy", async (req, res) => {
 const { getIndustries } = require("../controllers/admin/industry")
 Router.get("/industries", getIndustries)
 
+// skills (public — for recruiter pickers, bulk upload UI, etc.)
+const { getSkills } = require("../controllers/admin/skills")
+Router.get("/skills", getSkills)
+
 // testimonials
 const { getPublicTestimonials } = require("../controllers/testimonial")
 Router.get("/testimonials", getPublicTestimonials)

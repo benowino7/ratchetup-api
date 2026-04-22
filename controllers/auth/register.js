@@ -164,7 +164,7 @@ const register = async (req, res) => {
 
 				// Auto-grant a 90-day Free Trial subscription so brand-new
 				// candidates can update their profile + add a CV + see up
-				// to 5 manual matches before subscribing.
+				// to 25 manual matches before subscribing.
 				const trialPlan = await tx.subscriptionPlan.findFirst({
 					where: { name: "Free Trial", userType: "JOB_SEEKER", isActive: true },
 					select: { id: true },

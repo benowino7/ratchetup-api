@@ -521,8 +521,8 @@ async function handlesuggestJobsForJobSeeker(prisma, jobSeekerUserId, opts = {})
 
 	scored.sort((a, b) => b.score - a.score);
 
-	// Trial users see at most 5 manual matches (single page, no pagination).
-	const TRIAL_MAX_RESULTS = 5;
+	// Trial users see at most 25 manual matches (single page, no pagination).
+	const TRIAL_MAX_RESULTS = 25;
 	const trimmed = isTrial ? scored.slice(0, TRIAL_MAX_RESULTS) : scored;
 
 	const total = trimmed.length;

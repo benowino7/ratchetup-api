@@ -522,16 +522,72 @@ async function extractCvText(pdfBuffer) {
 }
 
 /**
- * Simple heuristic to extract candidate name from CV text
+ * Best-effort candidate-name extractor from raw CV text.
+ *
+ * Handles the two common failure modes of the previous one-line heuristic:
+ *  - A "Curriculum Vitae" prefix/suffix on the first line (eg. "Benson
+ *    Owino • Curriculum Vitae" or "Curriculum Vitae Jose Carlos Guimaraes"),
+ *  - ALL-CAPS names (converted to Title Case),
+ *  - Name split across separators (bullet, pipe, tabs, multiple spaces),
+ *  - Accented / non-ASCII letters (unicode letter class),
+ *  - Garbage first lines (emails, phone numbers, addresses) by scanning
+ *    the first eight non-empty lines.
  */
 function extractCandidateName(text) {
-	const lines = text.split("\n").filter((l) => l.trim().length > 0);
-	if (lines.length > 0) {
-		const firstLine = lines[0].trim();
-		if (firstLine.length < 60 && !firstLine.includes("@") && !firstLine.toLowerCase().includes("curriculum")) {
-			return firstLine;
+	if (!text) return "Unknown Candidate";
+
+	const BAD_WORDS = new Set([
+		"curriculum", "vitae", "resume", "cv", "personal", "information",
+		"contact", "details", "profile", "summary", "professional",
+		"objective", "experience", "education", "skills", "page",
+		"name", "date", "birth", "nationality", "address", "email",
+		"phone", "mobile", "linkedin",
+	]);
+
+	const stripBoilerplate = (s) =>
+		s
+			.replace(/^[\s•·|:_-]*curriculum\s+vitae[\s•·|:_-]*/i, "")
+			.replace(/[\s•·|:_-]*curriculum\s+vitae[\s•·|:_-]*$/i, "")
+			.replace(/^[\s•·|:_-]*resume[\s•·|:_-]+/i, "")
+			.replace(/^[\s•·|:_-]*cv[\s•·|:_-]+/i, "")
+			.replace(/\s+/g, " ")
+			.trim();
+
+	const splitTokens = (s) =>
+		s.split(/[|•·\t]|\s{3,}/).map((x) => x.trim()).filter(Boolean);
+
+	const looksLikeName = (s) => {
+		if (!s) return false;
+		if (s.length < 4 || s.length > 60) return false;
+		if (/[\d@]/.test(s)) return false;
+		if (!/^[\p{L}\s'.-]+$/u.test(s)) return false;
+		const words = s.split(/\s+/).filter(Boolean);
+		if (words.length < 2 || words.length > 5) return false;
+		for (const w of words) {
+			if (BAD_WORDS.has(w.toLowerCase())) return false;
+			if (!/^[\p{L}][\p{L}'.-]*$/u.test(w)) return false;
+		}
+		return true;
+	};
+
+	const titleCase = (s) =>
+		s.toLowerCase().replace(/(^|\s|['-])(\p{L})/gu, (_, sep, ch) => sep + ch.toUpperCase());
+
+	const lines = text
+		.split("\n")
+		.map((l) => l.trim())
+		.filter((l) => l.length > 0);
+
+	for (const raw of lines.slice(0, 8)) {
+		const stripped = stripBoilerplate(raw);
+		const cands = [stripped, ...splitTokens(stripped)];
+		for (const c of cands) {
+			if (looksLikeName(c)) {
+				return c === c.toUpperCase() ? titleCase(c) : c;
+			}
 		}
 	}
+
 	return "Unknown Candidate";
 }
 
